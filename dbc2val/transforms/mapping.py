@@ -19,7 +19,7 @@
 ########################################################################
 
 
-class mapping:
+class Mapping:
 
     # setting discard_non_matching_items to true will return "None" if a value
     # is not found in the mapping table. This can be used to only add

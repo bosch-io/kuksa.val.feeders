@@ -77,7 +77,7 @@ class DBCReader:
                         )
                     )
                     return id
-        log.warning("Signal {} not found in DBC file".format(sig_to_find))
+        log.warning("Signal %s not found in DBC file", sig_to_find)
         return None
 
     def rxWorker(self):
@@ -90,16 +90,13 @@ class DBCReader:
                     # log.debug("Decoded message: %s", str(decode))
                 except Exception:
                     self.parseErr += 1
-                    log.warning(
-                        "Error Decoding: ID:{}".format(msg.arbitration_id),
-                        exc_info=True,
-                    )
+                    log.warning("Error Decoding: ID: %s", msg.arbitration_id, exc_info=True)
                     continue
                 rxTime = time.time()
                 for k, v in decode.items():
                     if k in self.mapper:
                         if self.mapper.minUpdateTimeElapsed(k, rxTime):
-                            log.debug("* Handling Singal:{}, Value:{}".format(k, v))
+                            log.debug("* Handling Signal: %s, Value: %s", k, v)
                             self.queue.put((k, v))
         log.info("Stopped Rx thread")
 

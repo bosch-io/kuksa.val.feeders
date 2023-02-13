@@ -32,7 +32,7 @@ class CANplayer:
         self.timestamp = None
 
         # open the file for reading can messages
-        log.info("Replaying candump from {}".format(dumpfile))
+        log.info("Replaying candump from file: %s", dumpfile)
         log_reader = can.CanutilsLogReader(dumpfile)
         # get all messages out of the dumpfile and store into array of can messages
         for msg in log_reader:
@@ -41,7 +41,7 @@ class CANplayer:
             # add message to array
             self.messages.append(msg)
             # log.debug("Message Read out of candump file: \n{}".format(msgFromLog))
-        log.debug("Parsing of can messages form the dump file is finished")
+        log.debug("Parsing of CAN messages from dump file is finished")
 
     def start_replaying(self, canport):
         log.debug("Using virtual bus to replay CAN messages (channel: %s)", canport)
@@ -71,22 +71,20 @@ class CANplayer:
             if msg:
                 try:
                     self.bus.send(msg)
-                    log.debug(f"Message sent on {self.bus.channel_info}")
-                    log.debug(f"Message: {msg}")
+                    log.debug("Message sent on %s", self.bus.channel_info)
+                    log.debug("Message: %s", msg)
                 except can.CanError:
                     log.debug("Message NOT sent")
 
             # add a sleep of 1 ms to not busy loop here
             if self.timestamp:
-                log.debug(" --> delay({})".format((msg.timestamp - self.timestamp)))
+                log.debug(" --> delay(%d)", (msg.timestamp - self.timestamp))
                 if msg.timestamp > self.timestamp:
                     time.sleep(msg.timestamp - self.timestamp)
                 else:
                     log.debug(
-                        "msg.timestamp not increased: ({} < {})".format(
-                            msg.timestamp, self.timestamp
-                        )
-                    )
+                        "msg.timestamp not increased: (%d < %d)",
+                        msg.timestamp, self.timestamp)
             else:
                 time.sleep(0.001)
 

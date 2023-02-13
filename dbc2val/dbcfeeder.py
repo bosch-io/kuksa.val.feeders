@@ -38,17 +38,12 @@ import j1939reader
 from kuksa_viss_client import KuksaClientThread
 # databroker related
 import databroker
-
-# global variable for usecase, default databroker
-USE_CASE = ""
+# zenoh related
+import zenoh
 
 log = logging.getLogger("dbcfeeder")
 
-def init_logging(loglevel):
-    # create console handler and set level to debug
-    console_logger = logging.StreamHandler()
-    console_logger.setLevel(logging.DEBUG)
-
+def init_logging(rootLoggerLevel: any) -> None:
     # create formatter
     if sys.stdout.isatty():
         formatter = ColorFormatter()
@@ -57,12 +52,16 @@ def init_logging(loglevel):
             fmt="%(asctime)s %(levelname)s %(name)s: %(message)s"
         )
 
+    # create console handler and set level to debug
+    console_logger = logging.StreamHandler()
+    console_logger.setLevel(logging.DEBUG)
+
     # add formatter to console_logger
     console_logger.setFormatter(formatter)
 
     # add console_logger as a global handler
     root_logger = logging.getLogger()
-    root_logger.setLevel(loglevel)
+    root_logger.setLevel(rootLoggerLevel)
     root_logger.addHandler(console_logger)
 
 
@@ -86,29 +85,25 @@ class ColorFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-class Feeder:
+class _AbstractFeeder:
     def __init__(self):
         self._shutdown = False
         self._reader = None
         self._player = None
         self._mapper = None
-        self._provider = None
-        self._connected = False
-        self._registered = False
         self._can_queue = queue.Queue()
+        self._last_known_values = {}
 
     def start(
         self,
-        databroker_address,
         canport,
-        dbcfile,
-        mappingfile,
+        dbcfile: str,
+        mappingfile: str,
         candumpfile=None,
-        use_j1939=False,
-        grpc_metadata=None,
+        use_j1939=False
     ):
-        log.debug("Use mapping: {}".format(mappingfile))
-        self._mapper = dbc2vssmapper.mapper(mappingfile)
+        log.debug("Using mapping defined in file: %s", mappingfile)
+        self._mapper = dbc2vssmapper.Mapper(mappingfile)
 
         if use_j1939:
             log.info("Use J1939 reader")
@@ -120,7 +115,9 @@ class Feeder:
         else:
             log.info("Use DBC reader")
             self._reader = dbcreader.DBCReader(
-                rxqueue=self._can_queue, dbcfile=dbcfile, mapper=self._mapper
+                rxqueue=self._can_queue,
+                dbcfile=dbcfile,
+                mapper=self._mapper
             )
 
         if candumpfile:
@@ -139,15 +136,6 @@ class Feeder:
             log.info("Using socket CAN device '%s'", canport)
             self._reader.start_listening(bustype="socketcan", channel=canport)
        
-        # databroker related
-        if USE_CASE=="databroker":
-            log.info("Connecting to Data Broker using %s", databroker_address)
-            channel = grpc.insecure_channel(databroker_address)
-            channel.subscribe(
-                lambda connectivity: self.on_broker_connectivity_change(connectivity),
-                try_to_connect=False,
-            )
-            self._provider = databroker.Provider(channel, grpc_metadata)
         self._run()
 
     def stop(self):
@@ -162,37 +150,72 @@ class Feeder:
     def is_stopping(self):
         return self._shutdown
 
-    def on_broker_connectivity_change(self, connectivity):
-        log.debug("Connectivity changed to: %s", connectivity)
-        if (
-            connectivity == grpc.ChannelConnectivity.READY or
-            connectivity == grpc.ChannelConnectivity.IDLE
-        ):
-            # Can change between READY and IDLE. Only act if coming from
-            # unconnected state
-            if not self._connected:
-                log.info("Connected to data broker")
-                try:
-                    self._register_datapoints()
-                    self._registered = True
-                except Exception:
-                    log.error("Failed to register datapoints", exc_info=True)
-                self._connected = True
-        else:
-            if self._connected:
-                log.info("Disconnected from data broker")
-            else:
-                if connectivity == grpc.ChannelConnectivity.CONNECTING:
-                    log.info("Trying to connect to data broker")
-            self._connected = False
-            self._registered = False
+    def _report_value(self, target: str, value: any) -> None:
+        pass
+
+    def _connect(self) -> None:
+        pass
+
+    def _assert_connected(self) -> bool:
+        return True
+
+    def _run(self):
+
+        self._connect()
+        
+        while self._shutdown is False:
+            if not self._assert_connected():
+                continue
+
+            try:
+                can_signal, can_value = self._can_queue.get(timeout=1)
+                for target in self._mapper[can_signal]["targets"]:
+                    value = self._mapper.transform(can_signal, target, can_value)
+                    if value != can_value:
+                        log.debug(
+                            "Successfully transformed CAN signal [signal: %s, target: %s, CAN value: %s) -> %s",
+                            can_signal, target, can_value, value
+                        )
+                    # None indicates the transform decided to not set the value
+                    if value is None:
+                        log.warning(
+                            "Failed to transform CAN signal [signal: %s, target: %s, CAN value: %s)",
+                            can_signal, target, can_value)
+                    elif value == self._last_known_values.get(target):
+                        # do not send duplicate value
+                        log.debug("Ignoring unchanged data point [%s: %s]", target, value)
+                    else:
+                        # update last known value
+                        self._last_known_values[target] = value
+                        self._report_value(target, value)
+
+            except grpc.RpcError:
+                log.error("Failed to update data point", exc_info=True)
+            except queue.Empty:
+                pass
+            except Exception:
+                log.error("Exception caught in main loop", exc_info=True)
+
+
+class LoggingFeeder(_AbstractFeeder):
+    def _report_value(self, target: str, value: any) -> None:
+        log.info("Reporting updated data point [%s: %s]", target, value)
+class DataBrokerFeeder(_AbstractFeeder):
+
+    def __init__(self, databroker_address: str, grpc_metadata: dict=None):
+        super().__init__()
+        self._provider = None
+        self._registered = False
+        self._databroker_address = databroker_address
+        self._grpc_metadata = grpc_metadata
+        self._connected = False
 
     def _register_datapoints(self):
         log.info("Register datapoints")
         for entry in self._mapper.mapping:
             if len(self._mapper.mapping[entry]["targets"]) != 1:
                 log.warning(
-                    "Singal %s has multiple targets: %s",
+                    "Signal %s has multiple targets: %s",
                     entry,
                     list(self._mapper.mapping[entry]["targets"].keys()),
                 )
@@ -202,85 +225,117 @@ class Feeder:
                 self._mapper.mapping[entry]["databroker"]["changetype"],
                 self._mapper.mapping[entry]["vss"]["description"],
             )
-        
-    def _run(self):
-        # kuksa related
-        if USE_CASE=="kuksa":
-            global kuksaconfig
-            kuksa = KuksaClientThread(kuksaconfig)
-            kuksa.start()
-            kuksa.authorize()
-        
-        while self._shutdown is False:
-            # databroker related
-            if USE_CASE=="databroker":
-                if not self._connected:
-                    time.sleep(0.2)
-                    continue
-                elif not self._registered:
-                    time.sleep(1)
-                    try:
-                        self._register_datapoints()
-                        self._registered = True
-                    except Exception:
-                        log.error("Failed to register datapoints", exc_info=True)
-                        continue
+
+    def _on_broker_connectivity_change(self, connectivity: grpc.ChannelConnectivity.READY):
+        log.debug("Connectivity changed to: %s", connectivity)
+        if (
+            connectivity == grpc.ChannelConnectivity.READY or
+            connectivity == grpc.ChannelConnectivity.IDLE
+        ):
+            # Can change between READY and IDLE. Only act if coming from
+            # unconnected state
+            if not self._connected:
+                log.info("Connected to Data Broker")
+                try:
+                    self._register_datapoints()
+                    self._registered = True
+                except Exception:
+                    log.error("Failed to register data points", exc_info=True)
+                self._connected = True
+        else:
+            if self._connected:
+                log.info("Disconnected from Data Broker")
+            else:
+                if connectivity == grpc.ChannelConnectivity.CONNECTING:
+                    log.info("Trying to connect to Data Broker")
+            self._connected = False
+            self._registered = False
+
+    def _connect(self) -> None:
+        log.info("Connecting to Data Broker at %s", self._databroker_address)
+        channel = grpc.insecure_channel(self._databroker_address)
+        channel.subscribe(
+            lambda connectivity: self._on_broker_connectivity_change(connectivity),
+            try_to_connect=False,
+        )
+        self._provider = databroker.Provider(channel, self._grpc_metadata)
+
+    def _assert_connected(self) -> bool:
+        if not self._connected:
+            time.sleep(0.2)
+            return False
+        elif not self._registered:
+            time.sleep(1)
             try:
-                can_signal, can_value = self._can_queue.get(timeout=1)
-                for target in self._mapper[can_signal]["targets"]:
-                    value = self._mapper.transform(can_signal, target, can_value)
-                    if value != can_value:
-                        log.debug(
-                            "  transform({}, {}, {}) -> {}".format(
-                                can_signal, target, can_value, value
-                            )
-                        )
-                    # None indicates the transform decided to not set the value
-                    if value is None:
-                        log.warning(
-                            "failed to transform({}, {}, {})".format(
-                                can_signal, target, can_value
-                            )
-                        )
-                    else:
-                        # get values out of the canreplay and map to desired signals
-                        log.debug("Updating DataPoint(%s, %s)", target, value)
-                        # databroker related
-                        if USE_CASE=="databroker":
-                            # kuksa needs "false" and databroker False
-                            if value == "false":
-                                value = False
-                            # kuksa needs "true" and databroker True
-                            elif value == "true":
-                                value = True
-                            else:
-                                pass
-                            self._provider.update_datapoint(target, value)
-                        # kuksa related
-                        elif USE_CASE=="kuksa":
-                            resp=json.loads(kuksa.setValue(target, str(value)))
-                            if "error" in resp:
-                                if "message" in resp["error"]: 
-                                   log.error("Error setting {}: {}".format(target, resp["error"]["message"]))
-                                else:
-                                   log.error("Unknown error setting {}: {}".format(target, resp))
-                        else:
-                            log.error("USE_CASE is not set to databroker or kuksa", exc_info=True)
-
-            except grpc.RpcError:
-                log.error("Failed to update datapoints", exc_info=True)
-            except queue.Empty:
-                pass
+                self._register_datapoints()
+                self._registered = True
             except Exception:
-                log.error("Exception caught in main loop", exc_info=True)
+                log.error("Failed to register data points", exc_info=True)
+                return False
+        
+    def _report_value(self, target: str, value: any) -> None:
+        # databroker requires boolean values
+        if value == "false":
+            valueToReport = False
+        elif value == "true":
+            valueToReport = True
+        else:
+            valueToReport = value
+        log.debug("Reporting updated data point [%s: %s]", target, valueToReport)
+        self._provider.update_datapoint(target, valueToReport)
+class KuksaServerFeeder(_AbstractFeeder):
 
+    def __init__(self, kuksaconfig):
+        super().__init__()
+        self._kuksaClientThread = KuksaClientThread(kuksaconfig)
 
-def parse_config(filename):
+    def _connect(self) -> None:
+        self._kuksaClientThread.start()
+        self._kuksaClientThread.authorize()
+
+    def _report_value(self, target: str, value: any) -> None:
+        log.debug("Reporting updated data point [%s: %s]", target, value)
+        resp = json.loads(self._kuksaClientThread.setValue(target, str(value)))
+        if "error" in resp:
+            if "message" in resp["error"]: 
+                log.error("Error setting %s: %s", target, resp["error"]["message"])
+            else:
+                log.error("Unknown error setting %s: %s",target, resp)
+
+class ZenohFeeder(_AbstractFeeder):
+
+    def __init__(self):
+        super().__init__()
+        zenoh.init_logger()
+        self._target_to_key_map = {}
+
+    def _connect(self) -> None:
+        self._session = zenoh.open()
+
+    def _report_value(self, target: str, value: any) -> None:
+
+        if value == "false":
+            valueToReport = False
+        elif value == "true":
+            valueToReport = True
+        else:
+            valueToReport = value
+        
+        key = self._target_to_key_map.setdefault(target, zenoh.KeyExpr(target.replace(".", "/")))
+        log.debug("Reporting updated data point [%s: %s]", key, valueToReport)
+
+        self._session.put(key, valueToReport)
+
+    def stop(self):
+        self._session.close()
+        return super().stop()
+
+def parse_config(filename: str) -> dict:
     configfile = None
 
     if filename:
         if not os.path.exists(filename):
-            log.warning("Couldn't find config file {}".format(filename))
+            log.warning("Couldn't find config file %s", filename)
             raise Exception("Couldn't find config file {}".format(filename))
         configfile = filename
     else:
@@ -294,16 +349,16 @@ def parse_config(filename):
                 configfile = candidate
                 break
 
-    log.info("Using config: {}".format(configfile))
+    log.info("Using config file: %s", configfile)
     if configfile is None:
         return {}
 
     config = configparser.ConfigParser()
-    readed = config.read(configfile)
+    configFilesRead = config.read(configfile)
     if log.level >= logging.DEBUG:
         log.debug(
             "# config.read({}):\n{}".format(
-                readed,
+                configFilesRead,
                 {section: dict(config[section]) for section in config.sections()},
             )
         )
@@ -348,16 +403,6 @@ def main(argv):
         usecase = config["general"]["usecase"]
     else:
         usecase = "databroker"
-                  
-    global USE_CASE 
-    USE_CASE = usecase
-
-    # kuksa related
-    if USE_CASE=="kuksa":
-        global kuksaconfig
-        kuksaconfig = config
-        if "kuksa_val" in config:  
-            kuksaconfig = config["kuksa_val"]
 
     if args.address:
         databroker_address = args.address
@@ -427,10 +472,21 @@ def main(argv):
     else:
         grpc_metadata = None
 
-    feeder = Feeder()
+    match usecase:
+        case "databroker":
+            feeder = DataBrokerFeeder(databroker_address, grpc_metadata)
+        case "kuksa":
+            kuksaconfig = config
+            if "kuksa_val" in config:  
+                kuksaconfig = config["kuksa_val"]
+            feeder = KuksaServerFeeder(kuksaconfig)
+        case "zenoh":
+            feeder = ZenohFeeder()
+        case _:
+            feeder = LoggingFeeder()
 
     def signal_handler(signal_received, frame):
-        log.info(f"Received signal {signal_received}, stopping...")
+        log.info("Received signal %s, stopping...", signal_received)
 
         # If we get told to shutdown a second time. Just do it.
         if feeder.is_stopping():
@@ -444,20 +500,19 @@ def main(argv):
 
     log.info("Starting CAN feeder")
     feeder.start(
-        databroker_address=databroker_address,
         canport=canport,
         dbcfile=dbcfile,
         mappingfile=mappingfile,
         candumpfile=candumpfile,
-        use_j1939=use_j1939,
-        grpc_metadata=grpc_metadata,
+        use_j1939=use_j1939
     )
 
     return 0
 
 
-def parse_env_log(env_log, default=logging.INFO):
-    def parse_level(level, default=default):
+def parse_env_log(env_log: str, default: int = logging.INFO) -> dict:
+
+    def parse_level(level: str, default: str = default) -> str:
         if type(level) is str:
             if level.lower() in [
                 "debug",
@@ -484,7 +539,7 @@ def parse_env_log(env_log, default=logging.INFO):
                     raise Exception("multiple root loglevels specified")
                 else:
                     loglevels["root"] = parse_level(spec_parts[0])
-            if len(spec_parts) == 2:
+            elif len(spec_parts) == 2:
                 logger = spec_parts[0]
                 level = spec_parts[1]
                 loglevels[logger] = parse_level(level)

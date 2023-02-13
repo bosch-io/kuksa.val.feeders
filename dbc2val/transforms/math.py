@@ -21,7 +21,7 @@
 from py_expression_eval import Parser
 
 
-class math:
+class Math:
     def __init__(self):
         self.parser = Parser()
 

@@ -9,3 +9,4 @@ grpcio
 protobuf
 types-PyYAML 
 types-protobuf
+eclipse-zenoh == 0.6.0b1

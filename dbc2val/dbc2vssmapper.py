@@ -27,29 +27,28 @@ import logging
 log = logging.getLogger(__name__)
 
 
-class mapper:
-    def __init__(self, input):
-        with open(input, "r") as file:
+class Mapper:
+    def __init__(self, mappingFileName: str):
+        with open(mappingFileName, "r") as file:
             self.mapping = yaml.full_load(file)
 
         self.transforms = {}
-        self.transforms["fullmapping"] = transforms.mapping.mapping(
+        self.transforms["fullmapping"] = transforms.mapping.Mapping(
             discard_non_matching_items=True
         )
-        self.transforms["partialmapping"] = transforms.mapping.mapping(
+        self.transforms["partialmapping"] = transforms.mapping.Mapping(
             discard_non_matching_items=False
         )
-        self.transforms["math"] = transforms.math.math()
+        self.transforms["math"] = transforms.math.Math()
 
         for key in self.mapping.keys():
             self.mapping[key]["lastupdate"] = 0.0
             if "minupdatedelay" not in self.mapping[key]:
                 self.mapping[key]["minupdatedelay"] = 1000
-                log.info(
-                    "Mapper: No minimal update delay defined for signal {}, setting to 1000ms.".format(
-                        key
-                    )
-                )
+                log.info("""
+                    Mapper: No minimal update delay defined for signal [key: %s],
+                    setting to 1000ms.""",
+                    key)
 
     def map(self):
         return self.mapping.items()
