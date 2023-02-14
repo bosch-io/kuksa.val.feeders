@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 ########################################################################
-# Copyright (c) 2020 Robert Bosch GmbH
+# Copyright (c) 2020,2023 Robert Bosch GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -117,6 +117,7 @@ class Feeder:
         mappingfile,
         candumpfile=None,
         use_j1939=False,
+        use_strict_parsing=False,
         grpc_metadata=None,
     ):
         log.debug("Use mapping: {}".format(mappingfile))
@@ -128,11 +129,15 @@ class Feeder:
                 rxqueue=self._can_queue,
                 dbcfile=dbcfile,
                 mapper=self._mapper,
+                use_strict_parsing=use_strict_parsing,
             )
         else:
             log.info("Use DBC reader")
             self._reader = dbcreader.DBCReader(
-                rxqueue=self._can_queue, dbcfile=dbcfile, mapper=self._mapper
+                rxqueue=self._can_queue,
+                dbcfile=dbcfile,
+                mapper=self._mapper,
+                use_strict_parsing=use_strict_parsing,
             )
 
         if candumpfile:
@@ -268,7 +273,7 @@ class Feeder:
                                 else:
                                    log.error("Unknown error setting {}: {}".format(target, resp))
                         else:
-                            log.error("Unsupported server type: %s", server_type)
+                            log.error("Unsupported server type: %s", self._server_type)
 
             except kuksa_client.grpc.VSSClientError:
                 log.error("Failed to update datapoints", exc_info=True)
@@ -342,7 +347,12 @@ def main(argv):
         choices=[server_type.value for server_type in ServerType],
         type=ServerType,
     )
-
+    parser.add_argument(
+        "--lax",
+        dest="strict",
+        help="Disable strict parsing of CAN frames",
+        action="store_false",
+    )
     args = parser.parse_args()
 
     config = parse_config(args.config)
@@ -472,6 +482,7 @@ def main(argv):
         mappingfile=mappingfile,
         candumpfile=candumpfile,
         use_j1939=use_j1939,
+        use_strict_parsing=args.strict,
         grpc_metadata=grpc_metadata,
     )
 

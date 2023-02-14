@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 ########################################################################
-# Copyright (c) 2020 Robert Bosch GmbH
+# Copyright (c) 2020,2023 Robert Bosch GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import time
 
 import cantools
 import j1939
+from queue import Queue
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ class J1939Reader(j1939.ControllerApplication):
     # This CA produces simulated sensor values and cyclically sends them to
     # the bus with the PGN 0xFEF6 (Intake Exhaust Conditions 1)
 
-    def __init__(self, rxqueue, dbcfile, mapper):
+    def __init__(self, rxqueue: Queue, dbcfile: str, mapper: str, use_strict_parsing: bool):
         # compose the name descriptor for the new ca
         name = j1939.Name(
             arbitrary_address_capable=0,
@@ -58,7 +59,7 @@ class J1939Reader(j1939.ControllerApplication):
         j1939.ControllerApplication.__init__(self, name, device_address_preferred)
         # adaptation
         self.queue = rxqueue
-        self.db = cantools.database.load_file(dbcfile)
+        self.db = cantools.database.load_file(dbcfile, strict = use_strict_parsing)
         self.mapper = mapper
         self.canidwl = self.get_whitelist()
         self.parseErr = 0
