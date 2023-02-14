@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 ########################################################################
-# Copyright (c) 2020 Robert Bosch GmbH
+# Copyright (c) 2020,2023 Robert Bosch GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,16 +23,17 @@ import cantools
 import threading
 import time
 import logging
+from queue import Queue
 
 log = logging.getLogger(__name__)
 
 
 class DBCReader:
-    def __init__(self, rxqueue, dbcfile, mapper):
+    def __init__(self, rxqueue: Queue, dbcfile: str, mapper: str, use_strict_parsing: bool):
         self.queue = rxqueue
         self.mapper = mapper
         log.info("Reading DBC file {}".format(dbcfile))
-        self.db = cantools.database.load_file(dbcfile)
+        self.db = cantools.database.load_file(dbcfile, strict = use_strict_parsing)
         self.canidwl = self.get_whitelist()
         log.info("CAN ID whitelist={}".format(self.canidwl))
         self.parseErr = 0
